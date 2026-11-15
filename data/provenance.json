@@ -1,0 +1,67 @@
+{
+  "product": "KinField",
+  "version": "1.0.0",
+  "datasets": [
+    {
+      "id": "nasa_power",
+      "name": "NASA POWER Daily Agroclimatology",
+      "variables": ["T2M", "T2M_MAX", "T2M_MIN", "PRECTOTCORR", "GWETROOT", "ALLSKY_SFC_SW_DWN"],
+      "spatial_resolution": "0.5° × 0.625° (~50 km grid)",
+      "temporal_coverage": "2005-01-01 to 2024-12-31 (daily, 7,305 days)",
+      "role_in_app": "LIVE MODEL INPUT — Drives daily ET0, soil-water bucket balance, flowering heat spikes, frost risk, and root-zone soil moisture anomaly.",
+      "in_product": true,
+      "limitations": "Grid-cell averages (~50 km) smooth localized hailstorms, micro-topography, and canal seepage."
+    },
+    {
+      "id": "nasa_gibs_modis",
+      "name": "NASA GIBS MODIS Terra Corrected Reflectance (True Color)",
+      "layer_id": "MODIS_Terra_CorrectedReflectance_TrueColor",
+      "spatial_resolution": "250 m (GoogleMapsCompatible_Level9)",
+      "temporal_coverage": "Daily selectable via timeline scrubber",
+      "role_in_app": "MAP CONTEXT LAYER — Lets farmers visually inspect regional green-up, bare-field periods, and seasonal transitions.",
+      "in_product": true,
+      "limitations": "Optical imagery affected by monsoon cloud cover; visual context only (NDVI not ingested into the deterministic water-balance engine)."
+    },
+    {
+      "id": "nasa_gibs_smap",
+      "name": "NASA GIBS SMAP L4 Analyzed Root-Zone Soil Moisture",
+      "layer_id": "SMAP_L4_Analyzed_Root_Zone_Soil_Moisture",
+      "spatial_resolution": "~9 km (Level 4 assimilated product)",
+      "temporal_coverage": "Daily selectable via timeline scrubber",
+      "role_in_app": "MAP CONTEXT LAYER — Shows regional root-zone moisture gradients across districts; model uses NASA POWER GWETROOT + FAO-56 bucket.",
+      "in_product": true,
+      "limitations": "Assimilated ~9 km product cannot resolve individual 1-hectare field bunds or drip zones."
+    },
+    {
+      "id": "nasa_gibs_gpm",
+      "name": "NASA GIBS GPM IMERG Precipitation Rate",
+      "layer_id": "IMERG_Precipitation_Rate",
+      "spatial_resolution": "0.1° (~10 km)",
+      "temporal_coverage": "Daily selectable via timeline scrubber",
+      "role_in_app": "MAP CONTEXT LAYER — Visualizes satellite-derived rainfall swaths across the region.",
+      "in_product": true,
+      "limitations": "Snapshot precipitation rate layer for spatial context; 20-year water balance uses NASA POWER PRECTOTCORR daily totals."
+    },
+    {
+      "id": "isric_soilgrids",
+      "name": "ISRIC SoilGrids v2.0 + Regional Soil AWC Lookup",
+      "variables": ["clay", "sand", "soc", "AWC"],
+      "spatial_resolution": "250 m (live API) / Regional agro-ecological fallback",
+      "temporal_coverage": "Static pedological baseline (0–30 cm)",
+      "role_in_app": "LIVE MODEL INPUT — Sets soil water-holding bucket capacity (AWC mm/m). Uses 2.5s live REST query with documented regional fallback.",
+      "in_product": true,
+      "limitations": "Does not detect hardpan compaction, local salinity patches, or recent organic manure applications."
+    },
+    {
+      "id": "ecostress_landsat_gedi",
+      "name": "ECOSTRESS LST / Landsat NDVI / GEDI Biomass (Harmonization Context)",
+      "variables": ["LST", "NDVI", "AGBD"],
+      "spatial_resolution": "30 m – 70 m",
+      "temporal_coverage": "Scientific reference only (not queried live in request path)",
+      "role_in_app": "SCIENTIFIC ROADMAP — Documented in the Data Fusion guide to explain resolution harmonization; NOT claimed as live model inputs.",
+      "in_product": false,
+      "limitations": "Excluded from live synchronous analysis to guarantee <3s deterministic response without external STAC latency."
+    }
+  ],
+  "disclaimer": "KinField supports farmer and Krishi Vigyan Kendra (KVK) decision-making using historical satellite-reanalysis weather and soil water balance. It does NOT replace local soil testing, borewell/canal checks, pest scouting, or extension agronomist advice."
+}

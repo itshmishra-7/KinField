@@ -1,0 +1,6 @@
+{
+  "name": "KinField — NASA Climate Backtesting for Crop Rotations",
+  "description": "Farmer-centered decision-support platform that backtests multi-season crop rotations against 20 years of real NASA POWER daily climate data and NASA GIBS satellite imagery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

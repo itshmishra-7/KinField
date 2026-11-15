@@ -1,0 +1,76 @@
+{
+  "regions": [
+    {
+      "id": "hisar_semi_arid",
+      "name": "Western Haryana / Semi-Arid Alluvial Plains",
+      "lat_min": 28.2,
+      "lat_max": 29.9,
+      "lon_min": 74.4,
+      "lon_max": 76.7,
+      "texture": "Sandy Loam",
+      "awc_mm_per_m": 118,
+      "clay_pct": 14,
+      "sand_pct": 66,
+      "soc_g_kg": 4.1
+    },
+    {
+      "id": "punjab_central",
+      "name": "Central Punjab / Indo-Gangetic Loam",
+      "lat_min": 29.9,
+      "lat_max": 32.0,
+      "lon_min": 74.4,
+      "lon_max": 76.9,
+      "texture": "Loam",
+      "awc_mm_per_m": 142,
+      "clay_pct": 21,
+      "sand_pct": 44,
+      "soc_g_kg": 5.4
+    },
+    {
+      "id": "deccan_vertisol",
+      "name": "Marathwada / Deccan Basalt Black Soil (Vertisol)",
+      "lat_min": 17.5,
+      "lat_max": 21.5,
+      "lon_min": 73.5,
+      "lon_max": 78.0,
+      "texture": "Clay Loam (Vertisol)",
+      "awc_mm_per_m": 168,
+      "clay_pct": 42,
+      "sand_pct": 22,
+      "soc_g_kg": 6.2
+    },
+    {
+      "id": "indo_gangetic_east",
+      "name": "Central & Eastern Indo-Gangetic Plains",
+      "lat_min": 24.5,
+      "lat_max": 28.5,
+      "lon_min": 77.0,
+      "lon_max": 88.0,
+      "texture": "Silt Loam",
+      "awc_mm_per_m": 152,
+      "clay_pct": 20,
+      "sand_pct": 28,
+      "soc_g_kg": 5.8
+    },
+    {
+      "id": "us_midwest_mollisol",
+      "name": "Temperate Prairie Mollisol",
+      "lat_min": 37.0,
+      "lat_max": 46.0,
+      "lon_min": -102.0,
+      "lon_max": -82.0,
+      "texture": "Silty Clay Loam",
+      "awc_mm_per_m": 175,
+      "clay_pct": 28,
+      "sand_pct": 14,
+      "soc_g_kg": 22.0
+    }
+  ],
+  "default_fallback": {
+    "texture": "Medium Loam (Global Fallback)",
+    "awc_mm_per_m": 135,
+    "clay_pct": 22,
+    "sand_pct": 42,
+    "soc_g_kg": 7.0
+  }
+}
