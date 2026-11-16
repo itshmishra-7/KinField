@@ -158,6 +158,7 @@ export function MapWorkspace({
   const [scenarioLoading, setScenarioLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [results, setResults] = useState<AnalyzeResponse | null>(null);
+  const [showResultsOverlay, setShowResultsOverlay] = useState(true);
   const [rainPct, setRainPct] = useState(0);
   const [tempDelta, setTempDelta] = useState(0);
   const scenarioTimerRef = useRef<number | null>(null);
@@ -611,6 +612,7 @@ export function MapWorkspace({
       }
       const data = (await resp.json()) as AnalyzeResponse;
       setResults(data);
+      setShowResultsOverlay(true);
     } catch (err) {
       const msg =
         err instanceof Error && err.name === 'AbortError'
@@ -1000,7 +1002,7 @@ export function MapWorkspace({
         )}
       </AnimatePresence>
 
-      {/* Bottom Glass Sheet: Farmer Inputs OR Final Results */}
+      {/* Bottom Glass Sheet: Farmer Inputs OR Compact Return-to-Results Bar */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 sm:bottom-4 z-[600] px-0 sm:px-4">
         <AnimatePresence mode="wait">
           {pinnedLocation && !results && (
@@ -1149,19 +1151,54 @@ export function MapWorkspace({
             </motion.div>
           )}
 
-          {results && (
-            <ResultsSheet
-              key="results-sheet"
-              data={results}
-              rainPct={rainPct}
-              tempDelta={tempDelta}
-              onScenarioChange={handleScenarioChange}
-              scenarioLoading={scenarioLoading}
-              onEditInputs={() => setResults(null)}
-            />
+          {results && !showResultsOverlay && (
+            <motion.div
+              key="results-return-bar"
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 14 }}
+              transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              className="pointer-events-auto max-w-xl mx-auto px-4 py-2.5 rounded-xl bg-[#0B0F18]/94 backdrop-blur-md border border-white/15 shadow-2xl flex flex-wrap items-center justify-between gap-3 text-xs"
+            >
+              <span className="text-slate-300 truncate">
+                Simulation ready for <strong className="text-white">{results.location.label}</strong>
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setResults(null)}
+                  className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/12 text-slate-200 font-medium cursor-pointer transition-colors"
+                >
+                  Edit Inputs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowResultsOverlay(true)}
+                  className="px-3.5 py-1.5 rounded-lg bg-[#8AB4F8] hover:bg-[#A6C8FF] text-[#07090E] font-semibold cursor-pointer transition-colors"
+                >
+                  View 20-Year Results
+                </button>
+              </div>
+            </motion.div>
           )}
         </AnimatePresence>
       </div>
+
+      {/* Full-Viewport Results Workspace (Zero Clipping, Zero "Full Report" Click Needed) */}
+      <AnimatePresence>
+        {results && showResultsOverlay && (
+          <ResultsSheet
+            key="results-sheet"
+            data={results}
+            rainPct={rainPct}
+            tempDelta={tempDelta}
+            onScenarioChange={handleScenarioChange}
+            scenarioLoading={scenarioLoading}
+            onEditInputs={() => setResults(null)}
+            onViewMap={() => setShowResultsOverlay(false)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Non-hanging bounded loading indicator */}
       <AnimatePresence>
