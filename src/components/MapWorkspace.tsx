@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import L from 'leaflet';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -17,6 +17,12 @@ import {
   Search,
   LocateFixed,
   Undo2,
+  Sprout,
+  Route,
+  Building2,
+  Waves,
+  CheckCircle2,
+  ZoomIn,
 } from 'lucide-react';
 import type {
   AnalyzeResponse,
@@ -27,6 +33,7 @@ import type {
   MapLayerId,
   PriorityId,
 } from '../types';
+import { CROP_MEDIA } from '../data/cropMedia';
 import { ResultsSheet } from './ResultsSheet';
 
 interface MapWorkspaceProps {
@@ -36,18 +43,34 @@ interface MapWorkspaceProps {
   onOpenProvenance: () => void;
 }
 
+interface FarmlandParcel {
+  id: string;
+  label: string;
+  landuse: string;
+  centroid: [number, number];
+  area_ha: number;
+  coords: Array<[number, number]>;
+}
+
+interface LanduseStatus {
+  status: 'idle' | 'checking' | 'allowed' | 'blocked';
+  kind?: 'farmland' | 'rural' | 'road' | 'building' | 'water';
+  title?: string;
+  detail?: string;
+}
+
 const CROP_OPTIONS: Array<{ id: CropId; en: string; season: string }> = [
   { id: 'wheat', en: 'Wheat', season: 'Rabi' },
   { id: 'rice', en: 'Rice (Paddy)', season: 'Kharif' },
   { id: 'maize', en: 'Maize', season: 'Kharif' },
   { id: 'chickpea', en: 'Chickpea', season: 'Rabi' },
   { id: 'mustard', en: 'Mustard', season: 'Rabi' },
-  { id: 'moong', en: 'Green Gram (Moong)', season: 'Zaid' },
+  { id: 'moong', en: 'Green Gram', season: 'Zaid' },
   { id: 'sorghum', en: 'Sorghum', season: 'Kharif' },
   { id: 'cotton', en: 'Cotton', season: 'Kharif' },
   { id: 'soybean', en: 'Soybean', season: 'Kharif' },
   { id: 'groundnut', en: 'Groundnut', season: 'Kharif' },
-  { id: 'cover_crop', en: 'Sesbania / Cover Crop', season: 'Zaid' },
+  { id: 'cover_crop', en: 'Cover Crop', season: 'Zaid' },
   { id: 'fallow', en: 'Rest / Fallow', season: 'Zaid' },
 ];
 
@@ -100,6 +123,19 @@ function computePolygonAreaHa(coords: Array<[number, number]>): number {
   return Number((sqMeters / 10000).toFixed(2));
 }
 
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export function MapWorkspace({
   presets,
   initialPreset,
@@ -114,6 +150,8 @@ export function MapWorkspace({
   const polygonRef = useRef<L.Polygon | null>(null);
   const polyVerticesRef = useRef<L.CircleMarker[]>([]);
   const vulnGroupRef = useRef<L.LayerGroup | null>(null);
+  const farmsGroupRef = useRef<L.LayerGroup | null>(null);
+  const cropMaskLayerRef = useRef<L.GridLayer | null>(null);
 
   const [baseStyle, setBaseStyle] = useState<'dark-sat' | 'imagery' | 'dark'>('dark-sat');
   const [activeLayer, setActiveLayer] = useState<MapLayerId>('base');
@@ -121,7 +159,12 @@ export function MapWorkspace({
   const [gibsLoading, setGibsLoading] = useState<boolean>(false);
   const [showVulnOverlay, setShowVulnOverlay] = useState<boolean>(false);
 
-  // Location search & GPS state
+  const [showFarmsLayer, setShowFarmsLayer] = useState<boolean>(true);
+  const [farmlandParcels, setFarmlandParcels] = useState<FarmlandParcel[]>([]);
+  const [farmsLoading, setFarmsLoading] = useState<boolean>(false);
+  const [mapZoom, setMapZoom] = useState<number>(initialPreset ? 13 : 5);
+  const farmsTimerRef = useRef<number | null>(null);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<
     Array<{ name: string; display_name: string; lat: number; lon: number }>
@@ -131,7 +174,6 @@ export function MapWorkspace({
   const [gpsToast, setGpsToast] = useState<string | null>(null);
   const searchTimerRef = useRef<number | null>(null);
 
-  // Field placement state
   const [toolMode, setToolMode] = useState<'pin' | 'polygon'>('pin');
   const [pinnedLocation, setPinnedLocation] = useState<{
     lat: number;
@@ -143,9 +185,18 @@ export function MapWorkspace({
       ? { lat: initialPreset.lat, lon: initialPreset.lon, label: initialPreset.name, areaHa: null }
       : null
   );
+  const [landuseStatus, setLanduseStatus] = useState<LanduseStatus>(
+    initialPreset
+      ? {
+          status: 'allowed',
+          kind: 'farmland',
+          title: 'Benchmark Agricultural Region',
+          detail: 'Agricultural monitoring zone loaded with highlighted nearby farm plots.',
+        }
+      : { status: 'idle' }
+  );
   const [polygonPoints, setPolygonPoints] = useState<Array<[number, number]>>([]);
 
-  // Farmer inputs
   const [currentCrop, setCurrentCrop] = useState<CropId>(initialPreset?.default_crop ?? 'wheat');
   const [priorities, setPriorities] = useState<PriorityId[]>(['water', 'reliability']);
   const [irrigation, setIrrigation] = useState<IrrigationLevel>(
@@ -153,7 +204,6 @@ export function MapWorkspace({
   );
   const [equipment, setEquipment] = useState<EquipmentConstraint>('standard');
 
-  // Analysis & scenario state
   const [loading, setLoading] = useState(false);
   const [scenarioLoading, setScenarioLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -163,13 +213,96 @@ export function MapWorkspace({
   const [tempDelta, setTempDelta] = useState(0);
   const scenarioTimerRef = useRef<number | null>(null);
 
-  // Initialize Leaflet map once with topright zoom control (never blocked by bottom sheet)
+  const landuseReqIdRef = useRef(0);
+
+  const fetchFarmlandsAround = useCallback(async (lat: number, lon: number) => {
+    setFarmsLoading(true);
+    try {
+      const resp = await fetch(`/api/farmlands?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`);
+      if (!resp.ok) return;
+      const data = (await resp.json()) as { parcels?: FarmlandParcel[] };
+      if (Array.isArray(data.parcels)) {
+        setFarmlandParcels(data.parcels);
+      }
+    } catch {
+      // Keep existing parcels on transient Overpass timeout
+    } finally {
+      setFarmsLoading(false);
+    }
+  }, []);
+
+  const checkLanduseAt = useCallback(async (lat: number, lon: number, fallbackLabel?: string) => {
+    const reqId = ++landuseReqIdRef.current;
+    setLanduseStatus({
+      status: 'checking',
+      title: 'Checking land-use at pin…',
+      detail: 'Verifying agricultural land vs. roads, buildings, or water.',
+    });
+
+    try {
+      const resp = await fetch(`/api/landuse-check?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`);
+      if (reqId !== landuseReqIdRef.current) return;
+      if (!resp.ok) {
+        setLanduseStatus({ status: 'allowed', kind: 'rural', title: 'Rural Coordinate' });
+        return;
+      }
+      const data = (await resp.json()) as {
+        allowed: boolean;
+        kind: 'farmland' | 'rural' | 'road' | 'building' | 'water';
+        title: string;
+        detail: string;
+        label?: string;
+      };
+      if (reqId !== landuseReqIdRef.current) return;
+
+      if (data.label) {
+        setPinnedLocation((prev) => {
+          if (!prev) return prev;
+          if (Math.abs(prev.lat - lat) > 0.01 || Math.abs(prev.lon - lon) > 0.01) return prev;
+          return { ...prev, label: fallbackLabel || data.label };
+        });
+      }
+
+      setLanduseStatus({
+        status: data.allowed ? 'allowed' : 'blocked',
+        kind: data.kind,
+        title: data.title,
+        detail: data.detail,
+      });
+    } catch {
+      if (reqId !== landuseReqIdRef.current) return;
+      setLanduseStatus({ status: 'allowed', kind: 'rural', title: 'Rural Field Area' });
+    }
+  }, []);
+
+  const selectFarmParcel = useCallback((parcel: FarmlandParcel) => {
+    landuseReqIdRef.current++;
+    setErrorMsg(null);
+    setGpsToast(null);
+    setSearchResults([]);
+    setPolygonPoints([]);
+    setToolMode('pin');
+    setResults(null);
+    setPinnedLocation({
+      lat: parcel.centroid[0],
+      lon: parcel.centroid[1],
+      label: `${parcel.label} (${parcel.landuse})`,
+      areaHa: parcel.area_ha,
+    });
+    setLanduseStatus({
+      status: 'allowed',
+      kind: 'farmland',
+      title: 'Verified Agricultural Plot',
+      detail: `Selected mapped ${parcel.landuse} parcel (${parcel.area_ha} ha).`,
+    });
+  }, []);
+
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
     const startLat = initialPreset?.lat ?? 24.5;
     const startLon = initialPreset?.lon ?? 77.5;
-    const startZoom = initialPreset ? 12 : 5;
+    const startZoom = initialPreset ? 13 : 5;
 
     const map = L.map(mapContainerRef.current, {
       center: [startLat, startLon],
@@ -182,6 +315,9 @@ export function MapWorkspace({
 
     const baseGrp = L.layerGroup().addTo(map);
     baseLayerRef.current = baseGrp;
+
+    const farmsGroup = L.layerGroup().addTo(map);
+    farmsGroupRef.current = farmsGroup;
 
     const vulnGroup = L.layerGroup();
     VULNERABILITY_ZONES.forEach((z) => {
@@ -201,13 +337,16 @@ export function MapWorkspace({
     vulnGroupRef.current = vulnGroup;
     mapRef.current = map;
 
+    if (initialPreset) {
+      fetchFarmlandsAround(initialPreset.lat, initialPreset.lon);
+    }
+
     return () => {
       map.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [fetchFarmlandsAround, initialPreset]);
 
-  // Switch basemap between Dark Satellite (default), True Color Satellite, and Dark Vector
   useEffect(() => {
     const grp = baseLayerRef.current;
     if (!grp) return;
@@ -276,7 +415,6 @@ export function MapWorkspace({
     }
   }, [baseStyle]);
 
-  // Update NASA GIBS WMTS tile layer cleanly with dark-theme CSS filters
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -336,7 +474,6 @@ export function MapWorkspace({
     };
   }, [activeLayer, gibsDate]);
 
-  // Toggle Vulnerability overlay
   useEffect(() => {
     const map = mapRef.current;
     const grp = vulnGroupRef.current;
@@ -345,7 +482,152 @@ export function MapWorkspace({
     else map.removeLayer(grp);
   }, [showVulnOverlay]);
 
-  // Render marker and polygon on map
+  // Auto-load highlighted agricultural fields whenever user pans/zooms into local scale (z >= 11)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const onMoveEnd = () => {
+      const z = map.getZoom();
+      setMapZoom(z);
+      if (!showFarmsLayer || z < 11) {
+        if (z < 11) setFarmlandParcels([]);
+        return;
+      }
+      if (farmsTimerRef.current) window.clearTimeout(farmsTimerRef.current);
+      farmsTimerRef.current = window.setTimeout(() => {
+        const c = map.getCenter();
+        fetchFarmlandsAround(c.lat, c.lng);
+      }, 420);
+    };
+
+    map.on('moveend', onMoveEnd);
+    return () => {
+      map.off('moveend', onMoveEnd);
+      if (farmsTimerRef.current) window.clearTimeout(farmsTimerRef.current);
+    };
+  }, [showFarmsLayer, fetchFarmlandsAround]);
+
+  // Render real-time Sentinel-2 10m Cropland Highlight Layer (only Class 5 = Crops lit up in emerald)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (cropMaskLayerRef.current) {
+      map.removeLayer(cropMaskLayerRef.current);
+      cropMaskLayerRef.current = null;
+    }
+
+    if (!showFarmsLayer || mapZoom < 10) return;
+
+    const renderingRule = encodeURIComponent(
+      JSON.stringify({
+        rasterFunction: 'Colormap',
+        rasterFunctionArguments: {
+          Colormap: [[5, 16, 185, 129]],
+        },
+      })
+    );
+
+    const tileExtent = 20037508.342789244;
+    const S2CropLayer = L.GridLayer.extend({
+      createTile(coords: L.Coords) {
+        const tile = document.createElement('img');
+        const n = Math.pow(2, coords.z);
+        const worldSize = tileExtent * 2;
+        const tileSize = worldSize / n;
+        const xmin = -tileExtent + coords.x * tileSize;
+        const xmax = xmin + tileSize;
+        const ymax = tileExtent - coords.y * tileSize;
+        const ymin = ymax - tileSize;
+
+        tile.width = 256;
+        tile.height = 256;
+        tile.alt = '';
+        tile.crossOrigin = 'anonymous';
+        tile.src = `https://ic.imagery1.arcgis.com/arcgis/rest/services/Sentinel2_10m_LandCover/ImageServer/exportImage?bbox=${xmin.toFixed(
+          2
+        )},${ymin.toFixed(2)},${xmax.toFixed(2)},${ymax.toFixed(
+          2
+        )}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&noData=0&renderingRule=${renderingRule}&f=image`;
+        return tile;
+      },
+    });
+
+    const maskLayer = new (S2CropLayer as unknown as new (opts?: L.GridLayerOptions) => L.GridLayer)({
+      opacity: 0.36,
+      zIndex: 220,
+      maxZoom: 18,
+    });
+    maskLayer.addTo(map);
+    cropMaskLayerRef.current = maskLayer;
+
+    return () => {
+      if (cropMaskLayerRef.current) {
+        map.removeLayer(cropMaskLayerRef.current);
+        cropMaskLayerRef.current = null;
+      }
+    };
+  }, [showFarmsLayer, mapZoom >= 10]);
+
+  // Render glowing OSM farm boundaries + clickable verified cropland points
+  useEffect(() => {
+    const map = mapRef.current;
+    const grp = farmsGroupRef.current;
+    if (!map || !grp) return;
+    grp.clearLayers();
+
+    if (!showFarmsLayer || farmlandParcels.length === 0) return;
+
+    farmlandParcels.forEach((parcel) => {
+      const isOsmPolygon = parcel.id.startsWith('osm-');
+      if (isOsmPolygon) {
+        const poly = L.polygon(parcel.coords, {
+          color: '#34D399',
+          weight: 1.8,
+          fillColor: '#10B981',
+          fillOpacity: 0.22,
+        });
+
+        poly.on('mouseover', () => {
+          poly.setStyle({ weight: 2.6, fillOpacity: 0.38, color: '#6EE7B7' });
+        });
+        poly.on('mouseout', () => {
+          poly.setStyle({ weight: 1.8, fillOpacity: 0.22, color: '#34D399' });
+        });
+        poly.on('click', (ev) => {
+          L.DomEvent.stopPropagation(ev);
+          selectFarmParcel(parcel);
+        });
+        poly.bindTooltip(
+          `<div style="font-size:11px;font-weight:600;">${parcel.label} · ${parcel.area_ha} ha</div><div style="font-size:10px;opacity:0.8;">Click plot to analyze crops</div>`,
+          { sticky: true, direction: 'top' }
+        );
+        poly.addTo(grp);
+      }
+
+      const dot = L.circleMarker(parcel.centroid, {
+        radius: isOsmPolygon ? 5.5 : 6.5,
+        color: '#FFFFFF',
+        weight: 1.6,
+        fillColor: '#10B981',
+        fillOpacity: 0.94,
+      });
+      dot.on('click', (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        selectFarmParcel(parcel);
+      });
+      dot.bindTooltip(
+        `<div style="font-size:11px;font-weight:600;">${parcel.label}${
+          isOsmPolygon ? ` · ${parcel.area_ha} ha` : ' · Sentinel-2 10m'
+        }</div><div style="font-size:10px;opacity:0.8;">Click point to analyze field</div>`,
+        { direction: 'top', offset: [0, -6] }
+      );
+      dot.addTo(grp);
+    });
+  }, [farmlandParcels, showFarmsLayer, selectFarmParcel]);
+
+  // Render active user pin & drawn polygon
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -374,45 +656,32 @@ export function MapWorkspace({
       });
       if (polygonPoints.length >= 2) {
         polygonRef.current = L.polygon(polygonPoints, {
-          color: '#8AB4F8',
+          color: landuseStatus.status === 'blocked' ? '#F43F5E' : '#8AB4F8',
           weight: 2,
-          fillColor: '#8AB4F8',
+          fillColor: landuseStatus.status === 'blocked' ? '#F43F5E' : '#8AB4F8',
           fillOpacity: 0.22,
         }).addTo(map);
       }
     }
 
     if (pinnedLocation) {
+      const pinColor =
+        landuseStatus.status === 'blocked'
+          ? '#F43F5E'
+          : landuseStatus.kind === 'farmland'
+          ? '#10B981'
+          : '#8AB4F8';
+
       markerRef.current = L.circleMarker([pinnedLocation.lat, pinnedLocation.lon], {
         radius: 9,
         color: '#FFFFFF',
         weight: 2.5,
-        fillColor: '#8AB4F8',
-        fillOpacity: 0.95,
+        fillColor: pinColor,
+        fillOpacity: 0.96,
       }).addTo(map);
     }
-  }, [pinnedLocation, polygonPoints]);
+  }, [pinnedLocation, polygonPoints, landuseStatus]);
 
-  const resolvePlaceLabel = useCallback(async (lat: number, lon: number) => {
-    try {
-      const resp = await fetch(
-        `/api/reverse-geocode?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`
-      );
-      if (!resp.ok) return;
-      const data = (await resp.json()) as { label?: string };
-      if (data.label) {
-        setPinnedLocation((prev) => {
-          if (!prev) return prev;
-          if (Math.abs(prev.lat - lat) > 0.01 || Math.abs(prev.lon - lon) > 0.01) return prev;
-          return { ...prev, label: data.label };
-        });
-      }
-    } catch {
-      // Keep coordinate label on timeout
-    }
-  }, []);
-
-  // Handle map clicks for Pin or Polygon vertex
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -432,7 +701,7 @@ export function MapWorkspace({
           areaHa: null,
         });
         setResults(null);
-        resolvePlaceLabel(latR, lonR);
+        checkLanduseAt(latR, lonR);
       } else {
         setPolygonPoints((prev) => {
           const next: Array<[number, number]> = [...prev, [lat, lng]];
@@ -445,7 +714,7 @@ export function MapWorkspace({
               label: 'Custom Field Boundary',
               areaHa: computePolygonAreaHa(next),
             });
-            resolvePlaceLabel(cLat, cLon);
+            checkLanduseAt(cLat, cLon, 'Custom Field Boundary');
           }
           return next;
         });
@@ -456,7 +725,32 @@ export function MapWorkspace({
     return () => {
       map.off('click', handleClick);
     };
-  }, [toolMode, resolvePlaceLabel]);
+  }, [toolMode, checkLanduseAt]);
+
+  const nearestFarmParcel = useMemo(() => {
+    if (!pinnedLocation || farmlandParcels.length === 0) return null;
+    let best: FarmlandParcel | null = null;
+    let bestDist = Infinity;
+    for (const p of farmlandParcels) {
+      const d = haversineKm(pinnedLocation.lat, pinnedLocation.lon, p.centroid[0], p.centroid[1]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    return best ? { parcel: best, distanceKm: bestDist } : null;
+  }, [pinnedLocation, farmlandParcels]);
+
+  const handleSnapToNearestFarm = () => {
+    if (!nearestFarmParcel) return;
+    const { parcel } = nearestFarmParcel;
+    selectFarmParcel(parcel);
+    if (mapRef.current) {
+      mapRef.current.flyTo(parcel.centroid, Math.max(mapRef.current.getZoom(), 15), {
+        duration: 0.75,
+      });
+    }
+  };
 
   const handleSearchInput = (val: string) => {
     setSearchQuery(val);
@@ -489,6 +783,7 @@ export function MapWorkspace({
     lat: number;
     lon: number;
   }) => {
+    const shortLabel = item.display_name.split(',').slice(0, 2).join(', ');
     setSearchQuery(item.name);
     setSearchResults([]);
     setPolygonPoints([]);
@@ -499,12 +794,14 @@ export function MapWorkspace({
     setPinnedLocation({
       lat: item.lat,
       lon: item.lon,
-      label: item.display_name.split(',').slice(0, 2).join(', '),
+      label: shortLabel,
       areaHa: null,
     });
     if (mapRef.current) {
       mapRef.current.flyTo([item.lat, item.lon], 14, { duration: 0.9 });
     }
+    fetchFarmlandsAround(item.lat, item.lon);
+    checkLanduseAt(item.lat, item.lon, shortLabel);
   };
 
   const handleLocateGps = () => {
@@ -522,11 +819,12 @@ export function MapWorkspace({
         setPolygonPoints([]);
         setToolMode('pin');
         setResults(null);
-        setPinnedLocation({ lat, lon, label: 'My GPS Field', areaHa: null });
+        setPinnedLocation({ lat, lon, label: 'My GPS Location', areaHa: null });
         if (mapRef.current) {
           mapRef.current.flyTo([lat, lon], 15, { duration: 1.0 });
         }
-        resolvePlaceLabel(lat, lon);
+        fetchFarmlandsAround(lat, lon);
+        checkLanduseAt(lat, lon);
       },
       () => {
         setLocatingGps(false);
@@ -536,27 +834,38 @@ export function MapWorkspace({
     );
   };
 
-  const handleSelectPreset = useCallback((preset: DemoPreset) => {
-    setErrorMsg(null);
-    setGpsToast(null);
-    setSearchResults([]);
-    setPolygonPoints([]);
-    setToolMode('pin');
-    setPinnedLocation({
-      lat: preset.lat,
-      lon: preset.lon,
-      label: preset.name,
-      areaHa: null,
-    });
-    setCurrentCrop(preset.default_crop);
-    setIrrigation(preset.default_irrigation);
-    setResults(null);
-    setRainPct(0);
-    setTempDelta(0);
-    if (mapRef.current) {
-      mapRef.current.flyTo([preset.lat, preset.lon], 12, { duration: 0.8 });
-    }
-  }, []);
+  const handleSelectPreset = useCallback(
+    (preset: DemoPreset) => {
+      landuseReqIdRef.current++;
+      setErrorMsg(null);
+      setGpsToast(null);
+      setSearchResults([]);
+      setPolygonPoints([]);
+      setToolMode('pin');
+      setPinnedLocation({
+        lat: preset.lat,
+        lon: preset.lon,
+        label: preset.name,
+        areaHa: null,
+      });
+      setLanduseStatus({
+        status: 'allowed',
+        kind: 'farmland',
+        title: 'Benchmark Agricultural Region',
+        detail: 'Agricultural monitoring zone loaded with highlighted nearby farm plots.',
+      });
+      setCurrentCrop(preset.default_crop);
+      setIrrigation(preset.default_irrigation);
+      setResults(null);
+      setRainPct(0);
+      setTempDelta(0);
+      if (mapRef.current) {
+        mapRef.current.flyTo([preset.lat, preset.lon], 13, { duration: 0.8 });
+      }
+      fetchFarmlandsAround(preset.lat, preset.lon);
+    },
+    [fetchFarmlandsAround]
+  );
 
   const togglePriority = (p: PriorityId) => {
     setPriorities((prev) => {
@@ -571,7 +880,9 @@ export function MapWorkspace({
   };
 
   const handleClearField = () => {
+    landuseReqIdRef.current++;
     setPinnedLocation(null);
+    setLanduseStatus({ status: 'idle' });
     setPolygonPoints([]);
     setResults(null);
     setErrorMsg(null);
@@ -581,7 +892,7 @@ export function MapWorkspace({
   };
 
   const runAnalysis = async () => {
-    if (!pinnedLocation) return;
+    if (!pinnedLocation || landuseStatus.status === 'blocked') return;
     setLoading(true);
     setErrorMsg(null);
     setRainPct(0);
@@ -670,22 +981,26 @@ export function MapWorkspace({
     }, 200);
   };
 
+  const BlockedIcon =
+    landuseStatus.kind === 'road'
+      ? Route
+      : landuseStatus.kind === 'water'
+      ? Waves
+      : Building2;
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#05070B] select-none">
-      {/* Full-Viewport Interactive Satellite Map */}
       <div
         ref={mapContainerRef}
         className={`absolute inset-0 z-0 ${toolMode === 'polygon' ? 'cursor-crosshair' : ''}`}
       />
 
-      {/* Unified Non-Overlapping Top HUD Shell */}
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
         className="pointer-events-none absolute top-3 left-3 right-3 z-[500] flex flex-col lg:flex-row lg:items-start lg:justify-between gap-2.5"
       >
-        {/* Left Zone: Brand + Search + Vertical Tool Rail (stacked so they NEVER collide) */}
         <div className="flex flex-col items-start gap-2.5 shrink-0">
           <div className="pointer-events-auto flex items-center gap-2 bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 rounded-xl px-3 py-2 shadow-xl">
             <button
@@ -701,7 +1016,6 @@ export function MapWorkspace({
             </span>
           </div>
 
-          {/* Search Village / District / Coordinates */}
           <div className="pointer-events-auto relative w-64 sm:w-72">
             <div className="flex items-center gap-2 px-3 py-2 bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 focus-within:border-[#8AB4F8] rounded-xl shadow-xl">
               <Search className="w-4 h-4 text-slate-400 shrink-0" />
@@ -733,7 +1047,6 @@ export function MapWorkspace({
             )}
           </div>
 
-          {/* Left Tool Rail neatly inside the left stack */}
           {!results && (
             <div className="pointer-events-auto flex flex-col items-start gap-2">
               <div className="bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 rounded-xl p-1.5 flex flex-row lg:flex-col gap-1 shadow-xl">
@@ -758,7 +1071,7 @@ export function MapWorkspace({
                       ? 'bg-[#8AB4F8] text-[#07090E]'
                       : 'text-slate-300 hover:bg-white/10'
                   }`}
-                  title="Tap anywhere on map to place field pin"
+                  title="Tap any green highlighted farm plot or rural field"
                 >
                   <MapPin className="w-4 h-4" />
                   <span className="hidden sm:inline">Pin Field</span>
@@ -778,6 +1091,25 @@ export function MapWorkspace({
                 >
                   <Pentagon className="w-4 h-4" />
                   <span className="hidden sm:inline">Draw Field</span>
+                </button>
+
+                <button
+                  onClick={() => setShowFarmsLayer((v) => !v)}
+                  className={`px-3 py-2 rounded-lg text-xs font-medium inline-flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
+                    showFarmsLayer
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                      : 'text-slate-300 hover:bg-white/10'
+                  }`}
+                  title="Automatically highlight nearby agricultural fields & clickable farm points"
+                >
+                  {farmsLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sprout className="w-4 h-4" />
+                  )}
+                  <span className="hidden sm:inline">
+                    Farm Plots{farmlandParcels.length > 0 ? ` (${farmlandParcels.length})` : ''}
+                  </span>
                 </button>
 
                 <button
@@ -804,6 +1136,13 @@ export function MapWorkspace({
                   </button>
                 )}
               </div>
+
+              {showFarmsLayer && mapZoom < 11 && !pinnedLocation && (
+                <div className="max-w-[225px] px-2.5 py-2 rounded-xl bg-[#0B0F18]/90 border border-emerald-400/30 text-[11px] text-emerald-200 shadow-xl flex items-center gap-1.5">
+                  <ZoomIn className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                  <span>Zoom in or pick a village to highlight real farm plots.</span>
+                </div>
+              )}
 
               {gpsToast && (
                 <div className="max-w-[220px] p-2.5 rounded-xl bg-[#0B0F18]/94 border border-amber-400/40 text-[11px] text-amber-200 shadow-xl">
@@ -845,7 +1184,6 @@ export function MapWorkspace({
           )}
         </div>
 
-        {/* Center Zone: NASA GIBS Layer Switcher + Seasonal Timeline Scrubber */}
         <div className="pointer-events-auto flex flex-col items-center gap-2 lg:mx-auto">
           <div className="flex items-center gap-1 p-1 bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 rounded-xl shadow-xl">
             {(
@@ -962,7 +1300,6 @@ export function MapWorkspace({
           </AnimatePresence>
         </div>
 
-        {/* Right Zone: Provenance Button (placed neatly above topright zoom buttons) */}
         <button
           onClick={onOpenProvenance}
           className="pointer-events-auto self-end lg:self-auto px-3.5 py-2 bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 hover:border-[#8AB4F8]/50 rounded-xl text-xs font-medium text-slate-200 inline-flex items-center gap-2 shadow-xl cursor-pointer transition-colors shrink-0"
@@ -972,7 +1309,6 @@ export function MapWorkspace({
         </button>
       </motion.div>
 
-      {/* Single Clean Bottom Prompt + Pre-Seeded District Strip when no field is pinned */}
       <AnimatePresence>
         {!pinnedLocation && !results && (
           <motion.div
@@ -983,7 +1319,7 @@ export function MapWorkspace({
           >
             <div className="pointer-events-auto px-5 py-3 rounded-xl bg-[#0B0F18]/92 backdrop-blur-md border border-white/15 shadow-2xl flex flex-wrap items-center justify-center gap-2.5 text-xs sm:text-sm">
               <span className="text-slate-200">
-                Click anywhere on the satellite map to pin your field, or jump to:
+                Click a green highlighted farm plot or pin any agricultural field, or jump to:
               </span>
               <div className="flex items-center gap-1.5">
                 {presets.map((p) => (
@@ -1002,24 +1338,119 @@ export function MapWorkspace({
         )}
       </AnimatePresence>
 
-      {/* Bottom Glass Sheet: Farmer Inputs OR Compact Return-to-Results Bar */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 sm:bottom-4 z-[600] px-0 sm:px-4">
         <AnimatePresence mode="wait">
-          {pinnedLocation && !results && (
+          {pinnedLocation && !results && landuseStatus.status === 'blocked' && (
+            <motion.div
+              key="blocked-landuse-sheet"
+              initial={{ opacity: 0, y: 24 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+              className="pointer-events-auto w-full max-w-3xl mx-auto bg-[#0B0F18]/95 backdrop-blur-xl border border-rose-500/45 rounded-t-2xl sm:rounded-2xl shadow-2xl p-5 space-y-4"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/15 border border-rose-500/35 flex items-center justify-center shrink-0">
+                    <BlockedIcon className="w-5 h-5 text-rose-400" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-rose-400">
+                      Non-Agricultural Feature Detected
+                    </span>
+                    <h2 className="text-base font-bold text-white mt-0.5">
+                      {landuseStatus.title}
+                    </h2>
+                    <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                      {landuseStatus.detail}
+                    </p>
+                    <p className="text-[11px] font-mono-tabular text-slate-400 mt-1.5">
+                      {pinnedLocation.label || 'Selected Pin'} · {pinnedLocation.lat.toFixed(4)}°N,{' '}
+                      {pinnedLocation.lon.toFixed(4)}°E
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleClearField}
+                  className="text-xs text-slate-400 hover:text-white cursor-pointer shrink-0"
+                >
+                  Clear Pin
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-white/10">
+                <span className="text-xs text-slate-400">
+                  KinField filters out roads, houses, commercial areas, and water bodies so crop simulations only run on arable fields.
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {nearestFarmParcel ? (
+                    <button
+                      type="button"
+                      onClick={handleSnapToNearestFarm}
+                      className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#05100B] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <Sprout className="w-4 h-4" />
+                      Snap to Nearest Farm ({nearestFarmParcel.distanceKm.toFixed(2)} km)
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (mapRef.current && pinnedLocation) {
+                          mapRef.current.flyTo([pinnedLocation.lat, pinnedLocation.lon], 14, {
+                            duration: 0.75,
+                          });
+                          fetchFarmlandsAround(pinnedLocation.lat, pinnedLocation.lon);
+                        }
+                      }}
+                      className="px-4 py-2 rounded-xl bg-[#8AB4F8] hover:bg-[#A6C8FF] text-[#07090E] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <ZoomIn className="w-4 h-4" />
+                      Scan Nearby Farms
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleClearField}
+                    className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 text-xs font-medium text-slate-200 cursor-pointer transition-colors"
+                  >
+                    Pick Another Spot
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {pinnedLocation && !results && landuseStatus.status !== 'blocked' && (
             <motion.div
               key="setup-sheet"
               initial={{ opacity: 0, y: 24 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 20 }}
               transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-              className="pointer-events-auto w-full max-w-4xl mx-auto bg-[#0B0F18]/94 backdrop-blur-xl border border-white/15 rounded-t-2xl sm:rounded-2xl shadow-2xl p-5 space-y-4 max-h-[55vh] overflow-y-auto"
+              className="pointer-events-auto w-full max-w-5xl mx-auto bg-[#0B0F18]/95 backdrop-blur-xl border border-white/15 rounded-t-2xl sm:rounded-2xl shadow-2xl p-5 space-y-4 max-h-[68vh] overflow-y-auto"
             >
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
-                <div>
-                  <h2 className="text-base font-bold text-white">
-                    {pinnedLocation.label || 'Selected Field Coordinates'}
-                  </h2>
-                  <p className="text-xs font-mono-tabular text-slate-400">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-base font-bold text-white truncate">
+                      {pinnedLocation.label || 'Selected Field Coordinates'}
+                    </h2>
+                    {landuseStatus.status === 'checking' && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-[#8AB4F8]">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Verifying farm plot…
+                      </span>
+                    )}
+                    {landuseStatus.status === 'allowed' && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        {landuseStatus.title || 'Verified Field Area'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs font-mono-tabular text-slate-400 mt-0.5">
                     {pinnedLocation.lat.toFixed(4)}°N, {pinnedLocation.lon.toFixed(4)}°E
                     {pinnedLocation.areaHa
                       ? ` · Field Area: ${pinnedLocation.areaHa} ha (${(
@@ -1043,24 +1474,58 @@ export function MapWorkspace({
                 </div>
               )}
 
-              <div className="grid md:grid-cols-3 gap-4">
-                <div className="space-y-1.5">
+              {/* Visual Crop Selector with crop photos right beside every crop name */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
                   <label className="block text-xs font-semibold text-slate-300">
-                    1. Current Primary Crop
+                    1. Select Your Current Primary Crop
                   </label>
-                  <select
-                    value={currentCrop}
-                    onChange={(e) => setCurrentCrop(e.target.value as CropId)}
-                    className="w-full px-3 py-2.5 rounded-lg bg-[#111724] border border-white/15 text-sm text-white focus:outline-none focus:border-[#8AB4F8]"
-                  >
-                    {CROP_OPTIONS.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.en} ({c.season})
-                      </option>
-                    ))}
-                  </select>
+                  <span className="text-[11px] text-slate-400">
+                    Selected:{' '}
+                    <strong className="text-white">{CROP_MEDIA[currentCrop].name}</strong> ·{' '}
+                    {CROP_MEDIA[currentCrop].season}
+                  </span>
                 </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                  {CROP_OPTIONS.map((c) => {
+                    const media = CROP_MEDIA[c.id];
+                    const active = currentCrop === c.id;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => setCurrentCrop(c.id)}
+                        className={`p-1.5 rounded-xl border text-left flex items-center gap-2.5 transition-all cursor-pointer group ${
+                          active
+                            ? 'bg-[#8AB4F8]/18 border-[#8AB4F8] ring-1 ring-[#8AB4F8]/50'
+                            : 'bg-[#111724] border-white/10 hover:border-white/30'
+                        }`}
+                      >
+                        <div className="w-10 h-10 rounded-lg overflow-hidden bg-slate-800 shrink-0">
+                          <img
+                            src={media.image}
+                            alt={c.en}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <div
+                            className={`text-xs font-semibold truncate ${
+                              active ? 'text-white' : 'text-slate-200'
+                            }`}
+                          >
+                            {c.en}
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate">{c.season}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
+              <div className="grid md:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <label className="block text-xs font-semibold text-slate-300">
                     2. Water / Irrigation Access
@@ -1134,7 +1599,7 @@ export function MapWorkspace({
 
                 <button
                   type="button"
-                  disabled={loading}
+                  disabled={loading || landuseStatus.status === 'checking'}
                   onClick={runAnalysis}
                   className="px-6 py-3.5 rounded-xl bg-[#8AB4F8] hover:bg-[#A6C8FF] disabled:opacity-60 text-[#07090E] text-sm font-bold transition-colors whitespace-nowrap shrink-0 inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
@@ -1184,7 +1649,6 @@ export function MapWorkspace({
         </AnimatePresence>
       </div>
 
-      {/* Full-Viewport Results Workspace (Zero Clipping, Zero "Full Report" Click Needed) */}
       <AnimatePresence>
         {results && showResultsOverlay && (
           <ResultsSheet
@@ -1200,7 +1664,6 @@ export function MapWorkspace({
         )}
       </AnimatePresence>
 
-      {/* Non-hanging bounded loading indicator */}
       <AnimatePresence>
         {loading && (
           <motion.div
